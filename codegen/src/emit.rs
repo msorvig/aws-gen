@@ -90,8 +90,12 @@ fn emit_structure(
     in_input:  bool,
     in_output: bool,
 ) {
+    let rt = ctx.runtime_crate;
     let rust_name = to_pascal(name);
     let req_set: HashSet<&str> = shape.required.iter().map(String::as_str).collect();
+    let proto = ctx.model.metadata.protocol.as_str();
+    let is_json = matches!(proto, "json" | "rest-json");
+    let is_xml  = is_query_protocol(proto) || proto == "rest-xml";
 
     // Doc comment
     if let Some(doc) = &shape.documentation {
@@ -101,78 +105,14 @@ fn emit_structure(
         }
     }
 
-    // Derives: always Debug; Deserialize when in output context; Serialize for JSON input
-    let proto = ctx.model.metadata.protocol.as_str();
-    let is_rest_json = proto == "rest-json";
-    let is_rest_xml  = proto == "rest-xml";
-    let is_rest      = is_rest_json || is_rest_xml;
-
-    let mut derives = vec!["Debug", "Clone", "Default"];
-    if in_output {
-        derives.push("serde::Deserialize");
-    }
-    if in_input && (proto == "json" || is_rest_json) {
-        derives.push("serde::Serialize");
-    }
-    writeln!(out, "#[derive({})]", derives.join(", ")).unwrap();
-
-    // Serde rename attributes for wire format compatibility.
-    // JSON protocols (SSM, DynamoDB, rest-json) use PascalCase member names.
-    // EC2/query uses camelCase in XML. rest-xml (S3) uses PascalCase in XML.
-    let has_serde = in_output || (in_input && (proto == "json" || is_rest_json));
-    if has_serde {
-        match proto {
-            "json" | "rest-json" => {
-                writeln!(out, "#[serde(rename_all = \"PascalCase\", default)]").unwrap();
-            }
-            "rest-xml" => {
-                writeln!(out, "#[serde(default)]").unwrap();
-            }
-            _ => {
-                // query / ec2: camelCase for output deserialization
-                if in_output {
-                    writeln!(out, "#[serde(rename_all = \"camelCase\", default)]").unwrap();
-                }
-            }
-        }
-    }
-
+    // Struct definition — no serde derives
+    writeln!(out, "#[derive(Debug, Clone, Default)]").unwrap();
     writeln!(out, "pub struct {} {{", rust_name).unwrap();
 
     for (member_name, member_ref) in &shape.members {
         let rust_field = to_snake(member_name);
         let rust_type  = rust_field_type(ctx, member_ref, in_output);
         let required   = req_set.contains(member_name.as_str());
-
-        // REST protocols: members with a location annotation do NOT go in the JSON body.
-        // Only relevant when Serialize is derived (json/rest-json input structs).
-        let has_location = member_ref.location.as_deref()
-            .map(|loc| matches!(loc, "uri" | "querystring" | "header" | "headers"))
-            .unwrap_or(false);
-        let has_serde_derive = in_output || (in_input && (proto == "json" || is_rest_json));
-        if has_serde_derive && is_rest && has_location {
-            writeln!(out, "    #[serde(skip)]").unwrap();
-        }
-
-        // Wire name override
-        let wire = member_ref.wire_name(member_name);
-        if in_output {
-            if is_rest_xml {
-                // rest-xml: PascalCase XML elements — always need rename from snake_case
-                if wire != member_name {
-                    // locationName override
-                    writeln!(out, "    #[serde(rename = \"{wire}\")]").unwrap();
-                } else if to_snake(member_name) != *member_name {
-                    // Standard PascalCase → snake_case needs explicit rename back
-                    writeln!(out, "    #[serde(rename = \"{member_name}\")]").unwrap();
-                }
-            } else {
-                // camelCase protocols: only rename when wire name differs from camelCase convention
-                if wire != &to_camel(member_name) && wire != member_name {
-                    writeln!(out, "    #[serde(rename = \"{wire}\")]").unwrap();
-                }
-            }
-        }
 
         if required {
             writeln!(out, "    pub {rust_field}: {rust_type},").unwrap();
@@ -183,6 +123,130 @@ fn emit_structure(
 
     writeln!(out, "}}").unwrap();
     writeln!(out).unwrap();
+
+    // ── FromXml impl for XML output (query/ec2, rest-xml) ──────────────
+    if in_output && is_xml {
+        writeln!(out, "impl {rt}::aws::xml::FromXml for {rust_name} {{").unwrap();
+        writeln!(out, "    fn from_xml(node: &{rt}::aws::xml::XmlNode) -> Result<Self, String> {{").unwrap();
+        writeln!(out, "        Ok(Self {{").unwrap();
+
+        for (member_name, member_ref) in &shape.members {
+            let rust_field = to_snake(member_name);
+            let required   = req_set.contains(member_name.as_str());
+            let member_shape = ctx.model.shapes.get(&member_ref.shape);
+            let is_primitive = member_shape.map(|s| s.is_primitive()).unwrap_or(true);
+            let is_list = member_shape.map(|s| s.shape_type == "list").unwrap_or(false);
+
+            // Compute XML element name
+            let wire = member_ref.wire_name(member_name);
+            let xml_name = if proto == "rest-xml" {
+                // rest-xml: use locationName or PascalCase member name
+                wire.to_string()
+            } else {
+                // query/ec2: use locationName or camelCase
+                if wire != member_name { wire.to_string() } else { to_camel(member_name) }
+            };
+
+            if is_list {
+                // Lists: the list wrapper's FromXml handles child elements
+                if required {
+                    writeln!(out, "            {rust_field}: {t}::from_xml(node.child(\"{xml_name}\").unwrap_or(node))?,",
+                        t = rust_field_type(ctx, member_ref, true)).unwrap();
+                } else {
+                    writeln!(out, "            {rust_field}: node.child(\"{xml_name}\").map(|n| {t}::from_xml(n)).transpose()?,",
+                        t = rust_field_type(ctx, member_ref, true)).unwrap();
+                }
+            } else if is_primitive {
+                // Primitives: get text from child element
+                if required {
+                    writeln!(out, "            {rust_field}: node.child(\"{xml_name}\").map(|n| {rt}::aws::xml::FromXml::from_xml(n)).transpose()?.unwrap_or_default(),").unwrap();
+                } else {
+                    writeln!(out, "            {rust_field}: node.child(\"{xml_name}\").map(|n| {rt}::aws::xml::FromXml::from_xml(n)).transpose()?,").unwrap();
+                }
+            } else {
+                // Nested struct
+                if required {
+                    writeln!(out, "            {rust_field}: node.child(\"{xml_name}\").map(|n| {rt}::aws::xml::FromXml::from_xml(n)).transpose()?.unwrap_or_default(),").unwrap();
+                } else {
+                    writeln!(out, "            {rust_field}: node.child(\"{xml_name}\").map(|n| {rt}::aws::xml::FromXml::from_xml(n)).transpose()?,").unwrap();
+                }
+            }
+        }
+
+        writeln!(out, "        }})").unwrap();
+        writeln!(out, "    }}").unwrap();
+        writeln!(out, "}}").unwrap();
+        writeln!(out).unwrap();
+    }
+
+    // ── FromJsonValue impl for JSON output (json, rest-json) ───────────
+    if in_output && is_json {
+        writeln!(out, "impl {rt}::aws::json::FromJsonValue for {rust_name} {{").unwrap();
+        writeln!(out, "    fn from_json(v: &{rt}::serde_json::Value) -> Self {{").unwrap();
+        writeln!(out, "        Self {{").unwrap();
+
+        for (member_name, member_ref) in &shape.members {
+            let rust_field = to_snake(member_name);
+            let required   = req_set.contains(member_name.as_str());
+            let member_shape = ctx.model.shapes.get(&member_ref.shape);
+            let is_primitive_str = member_shape.map(|s| s.shape_type == "string" && s.enum_values.is_none()).unwrap_or(false);
+            let is_bool = member_shape.map(|s| s.shape_type == "boolean").unwrap_or(false);
+            let _rust_type = rust_field_type(ctx, member_ref, true);
+
+            // JSON key is PascalCase member name
+            if required {
+                if is_primitive_str {
+                    writeln!(out, "            {rust_field}: v.get(\"{member_name}\").and_then(|v| v.as_str()).unwrap_or(\"\").to_string(),").unwrap();
+                } else if is_bool {
+                    writeln!(out, "            {rust_field}: v.get(\"{member_name}\").and_then(|v| v.as_bool()).unwrap_or(false),").unwrap();
+                } else {
+                    writeln!(out, "            {rust_field}: v.get(\"{member_name}\").map(|v| {rt}::aws::json::FromJsonValue::from_json(v)).unwrap_or_default(),").unwrap();
+                }
+            } else {
+                if is_primitive_str {
+                    writeln!(out, "            {rust_field}: v.get(\"{member_name}\").and_then(|v| v.as_str()).map(String::from),").unwrap();
+                } else if is_bool {
+                    writeln!(out, "            {rust_field}: v.get(\"{member_name}\").and_then(|v| v.as_bool()),").unwrap();
+                } else {
+                    writeln!(out, "            {rust_field}: v.get(\"{member_name}\").filter(|v| !v.is_null()).map(|v| {rt}::aws::json::FromJsonValue::from_json(v)),").unwrap();
+                }
+            }
+        }
+
+        writeln!(out, "        }}").unwrap();
+        writeln!(out, "    }}").unwrap();
+        writeln!(out, "}}").unwrap();
+        writeln!(out).unwrap();
+    }
+
+    // ── ToJsonValue impl for JSON input (json, rest-json) ──────────────
+    if in_input && is_json {
+        writeln!(out, "impl {rt}::aws::json::ToJsonValue for {rust_name} {{").unwrap();
+        writeln!(out, "    fn to_json(&self) -> {rt}::serde_json::Value {{").unwrap();
+        writeln!(out, "        let mut m = {rt}::serde_json::Map::new();").unwrap();
+
+        for (member_name, member_ref) in &shape.members {
+            let rust_field = to_snake(member_name);
+            let required   = req_set.contains(member_name.as_str());
+
+            // Skip location-annotated members (they go in URI/query/headers, not body)
+            let has_location = member_ref.location.as_deref()
+                .map(|loc| matches!(loc, "uri" | "querystring" | "header" | "headers"))
+                .unwrap_or(false);
+            if has_location { continue; }
+
+            if required {
+                writeln!(out, "        m.insert(\"{member_name}\".into(), {rt}::aws::json::ToJsonValue::to_json(&self.{rust_field}));").unwrap();
+            } else {
+                writeln!(out, "        if let Some(ref v) = self.{rust_field} {{ m.insert(\"{member_name}\".into(), {rt}::aws::json::ToJsonValue::to_json(v)); }}").unwrap();
+            }
+        }
+
+        writeln!(out, "        {rt}::serde_json::Value::Object(m)").unwrap();
+        writeln!(out, "    }}").unwrap();
+        writeln!(out, "}}").unwrap();
+        writeln!(out).unwrap();
+    }
 
     // QueryEncode impl for input structs in query-protocol services
     if in_input && is_query_protocol(&ctx.model.metadata.protocol) {
@@ -278,6 +342,9 @@ fn emit_list_wrapper(
     in_output: bool,
 ) {
     let rt = ctx.runtime_crate;
+    let proto = ctx.model.metadata.protocol.as_str();
+    let is_json = matches!(proto, "json" | "rest-json");
+    let is_xml  = is_query_protocol(proto) || proto == "rest-xml";
     let rust_name = to_pascal(name);
     let item_ref  = match &shape.member {
         Some(m) => m,
@@ -287,22 +354,9 @@ fn emit_list_wrapper(
     // The XML element name for list items (from member.locationName, defaulting to "member")
     let item_xml  = item_ref.location_name.as_deref().unwrap_or("member");
 
-    let mut derives = vec!["Debug", "Clone", "Default"];
-    if in_output { derives.push("serde::Deserialize"); }
-    let is_json = matches!(ctx.model.metadata.protocol.as_str(), "json" | "rest-json");
-    if in_input && is_json { derives.push("serde::Serialize"); }
-
-    writeln!(out, "#[derive({})]", derives.join(", ")).unwrap();
-    if is_json {
-        // JSON protocols: serialize/deserialize as a plain array
-        writeln!(out, "#[serde(transparent)]").unwrap();
-    } else if in_output {
-        writeln!(out, "#[serde(default)]").unwrap();
-    }
+    // Struct definition — no serde
+    writeln!(out, "#[derive(Debug, Clone, Default)]").unwrap();
     writeln!(out, "pub struct {rust_name} {{").unwrap();
-    if !is_json && in_output {
-        writeln!(out, "    #[serde(rename = \"{item_xml}\", default)]").unwrap();
-    }
     writeln!(out, "    pub item: Vec<{item_rust}>,").unwrap();
     writeln!(out, "}}").unwrap();
     writeln!(out).unwrap();
@@ -313,8 +367,45 @@ fn emit_list_wrapper(
     writeln!(out, "}}").unwrap();
     writeln!(out).unwrap();
 
+    // FromXml for XML output
+    if in_output && is_xml {
+        writeln!(out, "impl {rt}::aws::xml::FromXml for {rust_name} {{").unwrap();
+        writeln!(out, "    fn from_xml(node: &{rt}::aws::xml::XmlNode) -> Result<Self, String> {{").unwrap();
+        writeln!(out, "        let items = node.children(\"{item_xml}\")").unwrap();
+        writeln!(out, "            .into_iter()").unwrap();
+        writeln!(out, "            .map(|n| {rt}::aws::xml::FromXml::from_xml(n))").unwrap();
+        writeln!(out, "            .collect::<Result<Vec<_>, _>>()?;").unwrap();
+        writeln!(out, "        Ok(Self {{ item: items }})").unwrap();
+        writeln!(out, "    }}").unwrap();
+        writeln!(out, "}}").unwrap();
+        writeln!(out).unwrap();
+    }
+
+    // FromJsonValue for JSON output
+    if in_output && is_json {
+        writeln!(out, "impl {rt}::aws::json::FromJsonValue for {rust_name} {{").unwrap();
+        writeln!(out, "    fn from_json(v: &{rt}::serde_json::Value) -> Self {{").unwrap();
+        writeln!(out, "        let items = v.as_array()").unwrap();
+        writeln!(out, "            .map(|arr| arr.iter().map(|e| {rt}::aws::json::FromJsonValue::from_json(e)).collect())").unwrap();
+        writeln!(out, "            .unwrap_or_default();").unwrap();
+        writeln!(out, "        Self {{ item: items }}").unwrap();
+        writeln!(out, "    }}").unwrap();
+        writeln!(out, "}}").unwrap();
+        writeln!(out).unwrap();
+    }
+
+    // ToJsonValue for JSON input
+    if in_input && is_json {
+        writeln!(out, "impl {rt}::aws::json::ToJsonValue for {rust_name} {{").unwrap();
+        writeln!(out, "    fn to_json(&self) -> {rt}::serde_json::Value {{").unwrap();
+        writeln!(out, "        {rt}::serde_json::Value::Array(self.item.iter().map(|v| {rt}::aws::json::ToJsonValue::to_json(v)).collect())").unwrap();
+        writeln!(out, "    }}").unwrap();
+        writeln!(out, "}}").unwrap();
+        writeln!(out).unwrap();
+    }
+
     // QueryEncode for lists used in query-protocol inputs
-    if in_input && is_query_protocol(&ctx.model.metadata.protocol) {
+    if in_input && is_query_protocol(proto) {
         writeln!(out, "impl {rt}::aws::query_proto::QueryEncode for {rust_name} {{").unwrap();
         writeln!(out, "    fn encode(&self, prefix: &str, out: &mut Vec<(String, String)>) {{").unwrap();
         writeln!(out, "        self.encode_items(prefix, out);").unwrap();
@@ -334,22 +425,38 @@ fn emit_list_wrapper(
 
 fn emit_string_enum(out: &mut String, ctx: &EmitCtx<'_>, name: &str, shape: &Shape) {
     let rt = ctx.runtime_crate;
+    let proto = ctx.model.metadata.protocol.as_str();
+    let is_json = matches!(proto, "json" | "rest-json");
+    let is_xml  = is_query_protocol(proto) || proto == "rest-xml";
     let rust_name  = to_pascal(name);
     let enum_vals  = shape.enum_values.as_ref().unwrap();
 
-    writeln!(out, "#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]").unwrap();
+    // Enum definition — no serde
+    writeln!(out, "#[derive(Debug, Clone, PartialEq, Eq)]").unwrap();
     writeln!(out, "pub enum {rust_name} {{").unwrap();
     for v in enum_vals {
         let variant = sanitize_enum_variant(v);
-        if variant != *v {
-            writeln!(out, "    #[serde(rename = \"{v}\")]").unwrap();
-        }
         writeln!(out, "    {variant},").unwrap();
     }
-    // Always include an Unknown variant to handle future values gracefully
-    writeln!(out, "    #[serde(other)] Unknown,").unwrap();
+    writeln!(out, "    Unknown,").unwrap();
     writeln!(out, "}}").unwrap();
     writeln!(out).unwrap();
+
+    // from_str helper (shared by FromXml and FromJsonValue)
+    writeln!(out, "impl {rust_name} {{").unwrap();
+    writeln!(out, "    fn from_str(s: &str) -> Self {{").unwrap();
+    writeln!(out, "        match s {{").unwrap();
+    for v in enum_vals {
+        let variant = sanitize_enum_variant(v);
+        writeln!(out, "            \"{v}\" => Self::{variant},").unwrap();
+    }
+    writeln!(out, "            _ => Self::Unknown,").unwrap();
+    writeln!(out, "        }}").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out, "}}").unwrap();
+    writeln!(out).unwrap();
+
+    // ToAwsStr (used by QueryEncode and Display)
     writeln!(out, "impl {rt}::aws::query_proto::ToAwsStr for {rust_name} {{").unwrap();
     writeln!(out, "    fn to_aws_str(&self) -> String {{").unwrap();
     writeln!(out, "        match self {{").unwrap();
@@ -362,7 +469,8 @@ fn emit_string_enum(out: &mut String, ctx: &EmitCtx<'_>, name: &str, shape: &Sha
     writeln!(out, "    }}").unwrap();
     writeln!(out, "}}").unwrap();
     writeln!(out).unwrap();
-    // Display impl (delegates to ToAwsStr, enables .to_string() for querystring use)
+
+    // Display
     writeln!(out, "impl std::fmt::Display for {rust_name} {{").unwrap();
     writeln!(out, "    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {{").unwrap();
     writeln!(out, "        use {rt}::aws::query_proto::ToAwsStr as _;").unwrap();
@@ -370,12 +478,45 @@ fn emit_string_enum(out: &mut String, ctx: &EmitCtx<'_>, name: &str, shape: &Sha
     writeln!(out, "    }}").unwrap();
     writeln!(out, "}}").unwrap();
     writeln!(out).unwrap();
-    // Default impl (defaults to Unknown)
+
+    // Default
     writeln!(out, "impl Default for {rust_name} {{").unwrap();
     writeln!(out, "    fn default() -> Self {{ Self::Unknown }}").unwrap();
     writeln!(out, "}}").unwrap();
     writeln!(out).unwrap();
-    // QueryEncode for enum values used in query-protocol list items
+
+    // FromXml
+    if is_xml {
+        writeln!(out, "impl {rt}::aws::xml::FromXml for {rust_name} {{").unwrap();
+        writeln!(out, "    fn from_xml(node: &{rt}::aws::xml::XmlNode) -> Result<Self, String> {{").unwrap();
+        writeln!(out, "        Ok(Self::from_str(&node.text().unwrap_or_default()))").unwrap();
+        writeln!(out, "    }}").unwrap();
+        writeln!(out, "}}").unwrap();
+        writeln!(out).unwrap();
+    }
+
+    // FromJsonValue
+    if is_json {
+        writeln!(out, "impl {rt}::aws::json::FromJsonValue for {rust_name} {{").unwrap();
+        writeln!(out, "    fn from_json(v: &{rt}::serde_json::Value) -> Self {{").unwrap();
+        writeln!(out, "        Self::from_str(v.as_str().unwrap_or(\"\"))").unwrap();
+        writeln!(out, "    }}").unwrap();
+        writeln!(out, "}}").unwrap();
+        writeln!(out).unwrap();
+    }
+
+    // ToJsonValue
+    if is_json {
+        writeln!(out, "impl {rt}::aws::json::ToJsonValue for {rust_name} {{").unwrap();
+        writeln!(out, "    fn to_json(&self) -> {rt}::serde_json::Value {{").unwrap();
+        writeln!(out, "        use {rt}::aws::query_proto::ToAwsStr as _;").unwrap();
+        writeln!(out, "        {rt}::serde_json::Value::String(self.to_aws_str())").unwrap();
+        writeln!(out, "    }}").unwrap();
+        writeln!(out, "}}").unwrap();
+        writeln!(out).unwrap();
+    }
+
+    // QueryEncode
     writeln!(out, "impl {rt}::aws::query_proto::QueryEncode for {rust_name} {{").unwrap();
     writeln!(out, "    fn encode(&self, prefix: &str, out: &mut Vec<(String, String)>) {{").unwrap();
     writeln!(out, "        use {rt}::aws::query_proto::ToAwsStr as _;").unwrap();
@@ -419,13 +560,16 @@ fn emit_query_op(
         }
     });
 
-    // Emit a private envelope struct so quick-xml can unwrap the intermediate element.
+    // For result-wrapper unwrapping, emit a FromXml wrapper that extracts the child element.
     if let Some(wrapper) = wrapper_element {
         let env_name = format!("{name}Envelope__");
-        writeln!(out, "#[derive(serde::Deserialize)]").unwrap();
-        writeln!(out, "struct {env_name} {{").unwrap();
-        writeln!(out, "    #[serde(rename = \"{wrapper}\")]").unwrap();
-        writeln!(out, "    result: {output_type},").unwrap();
+        writeln!(out, "struct {env_name};").unwrap();
+        writeln!(out, "impl {env_name} {{").unwrap();
+        writeln!(out, "    fn unwrap(node: &{rt}::aws::xml::XmlNode) -> Result<{output_type}, String> {{").unwrap();
+        writeln!(out, "        let child = node.child(\"{wrapper}\")").unwrap();
+        writeln!(out, "            .ok_or_else(|| \"missing {wrapper} element\".to_string())?;").unwrap();
+        writeln!(out, "        {rt}::aws::xml::FromXml::from_xml(child)").unwrap();
+        writeln!(out, "    }}").unwrap();
         writeln!(out, "}}").unwrap();
         writeln!(out).unwrap();
     }
@@ -450,8 +594,13 @@ fn emit_query_op(
         writeln!(out, "    client.query_request_void(\"{endpoint}\", \"{version}\", \"{name}\", params).await").unwrap();
     } else if wrapper_element.is_some() {
         let env_name = format!("{name}Envelope__");
-        writeln!(out, "    let envelope: {env_name} = client.query_request(\"{endpoint}\", \"{version}\", \"{name}\", params).await?;").unwrap();
-        writeln!(out, "    Ok(envelope.result)").unwrap();
+        // query_request returns the XML root; we need to unwrap the wrapper child
+        writeln!(out, "    let root: {rt}::aws::xml::XmlNode = {{").unwrap();
+        writeln!(out, "        use {rt}::aws::query_proto::QueryEncode as _;").unwrap();
+        writeln!(out, "        // Build and send the request, get raw XML back").unwrap();
+        writeln!(out, "        client.query_request_raw(\"{endpoint}\", \"{version}\", \"{name}\", params).await?").unwrap();
+        writeln!(out, "    }};").unwrap();
+        writeln!(out, "    {env_name}::unwrap(&root).map_err(|e| {rt}::aws::AwsError::XmlParse(e))").unwrap();
     } else {
         writeln!(out, "    client.query_request(\"{endpoint}\", \"{version}\", \"{name}\", params).await").unwrap();
     }
@@ -487,7 +636,7 @@ fn emit_json_op(
     if input_type.is_some() {
         writeln!(out, "    client.json_request(\"{endpoint}\", \"{target}\", &input).await").unwrap();
     } else {
-        writeln!(out, "    client.json_request(\"{endpoint}\", \"{target}\", &serde_json::json!({{}})).await").unwrap();
+        writeln!(out, "    client.json_request(\"{endpoint}\", \"{target}\", &()).await").unwrap();
     }
 
     writeln!(out, "}}").unwrap();
@@ -595,11 +744,10 @@ fn emit_rest_json_op(
         }
     } else {
         writeln!(out, "    let uri = \"{uri_template}\";").unwrap();
-        writeln!(out, "    let empty: serde_json::Value = serde_json::json!({{}});").unwrap();
         if output_type == "()" {
-            writeln!(out, "    client.rest_json_request_void(\"{endpoint}\", \"{method}\", uri, &[], &[], &empty).await").unwrap();
+            writeln!(out, "    client.rest_json_request_void(\"{endpoint}\", \"{method}\", uri, &[], &[], &()).await").unwrap();
         } else {
-            writeln!(out, "    client.rest_json_request(\"{endpoint}\", \"{method}\", uri, &[], &[], &empty).await").unwrap();
+            writeln!(out, "    client.rest_json_request(\"{endpoint}\", \"{method}\", uri, &[], &[], &()).await").unwrap();
         }
     }
 

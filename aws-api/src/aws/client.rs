@@ -111,7 +111,7 @@ impl Client {
 
     // ── Query protocol (EC2, IAM) ──────────────────────────────────────
 
-    pub async fn query_request<T: serde::de::DeserializeOwned>(
+    pub async fn query_request<T: super::xml::FromXml>(
         &self,
         service: &str,
         version: &str,
@@ -154,7 +154,58 @@ impl Client {
         if status >= 300 {
             return Err(parse_xml_error(&text, status));
         }
-        quick_xml::de::from_str::<T>(&text)
+        let root = super::xml::XmlNode::parse(&text)
+            .map_err(|e| AwsError::XmlParse(format!("{e}\n--- body ---\n{}", &text[..text.len().min(500)])))?;
+        T::from_xml(&root)
+            .map_err(|e| AwsError::XmlParse(format!("{e}\n--- body ---\n{}", &text[..text.len().min(500)])))
+    }
+
+    /// Like query_request but returns the parsed XML root node directly.
+    /// Used by operations that need to unwrap a resultWrapper element.
+    pub async fn query_request_raw(
+        &self,
+        service: &str,
+        version: &str,
+        action: &str,
+        mut params: Vec<(String, String)>,
+    ) -> Result<super::xml::XmlNode, AwsError> {
+        params.push(("Action".into(), action.into()));
+        params.push(("Version".into(), version.into()));
+        let body = query_proto::encode_form(&params);
+
+        let host = format!("{service}.{}.amazonaws.com", self.region);
+        let url = format!("https://{host}/");
+
+        let (date_stamp, amz_date) = now_stamps();
+        let content_type = "application/x-www-form-urlencoded; charset=utf-8";
+        let payload_hash = hex_sha256(body.as_bytes());
+
+        let (headers_to_sign, canonical) = if let Some(token) = &self.session_token {
+            ("content-type;host;x-amz-date;x-amz-security-token".to_string(),
+             format!("POST\n/\n\ncontent-type:{content_type}\nhost:{host}\nx-amz-date:{amz_date}\nx-amz-security-token:{token}\n\ncontent-type;host;x-amz-date;x-amz-security-token\n{payload_hash}"))
+        } else {
+            ("content-type;host;x-amz-date".to_string(),
+             format!("POST\n/\n\ncontent-type:{content_type}\nhost:{host}\nx-amz-date:{amz_date}\n\ncontent-type;host;x-amz-date\n{payload_hash}"))
+        };
+        let auth = self.sign_v4(service, &date_stamp, &amz_date, &headers_to_sign, &canonical);
+
+        let mut hdrs: Vec<(&str, &str)> = vec![
+            ("Content-Type", content_type),
+            ("Host", &host),
+            ("X-Amz-Date", &amz_date),
+            ("Authorization", &auth),
+        ];
+        if let Some(token) = &self.session_token {
+            hdrs.push(("X-Amz-Security-Token", token));
+        }
+
+        let req = self.build_request("POST", &url, &hdrs, body.into_bytes());
+        let (status, text) = self.send(req).await?;
+
+        if status >= 300 {
+            return Err(parse_xml_error(&text, status));
+        }
+        super::xml::XmlNode::parse(&text)
             .map_err(|e| AwsError::XmlParse(format!("{e}\n--- body ---\n{}", &text[..text.len().min(500)])))
     }
 
@@ -163,25 +214,56 @@ impl Client {
         service: &str,
         version: &str,
         action: &str,
-        params: Vec<(String, String)>,
+        mut params: Vec<(String, String)>,
     ) -> Result<(), AwsError> {
-        let _: serde_json::Value = self.query_request(service, version, action, params).await
-            .or_else(|e| match &e {
-                AwsError::XmlParse(_) => Ok(serde_json::Value::Null),
-                _ => Err(e),
-            })?;
+        params.push(("Action".into(), action.into()));
+        params.push(("Version".into(), version.into()));
+        let body = query_proto::encode_form(&params);
+
+        let host = format!("{service}.{}.amazonaws.com", self.region);
+        let url = format!("https://{host}/");
+
+        let (date_stamp, amz_date) = now_stamps();
+        let content_type = "application/x-www-form-urlencoded; charset=utf-8";
+        let payload_hash = hex_sha256(body.as_bytes());
+
+        let (headers_to_sign, canonical) = if let Some(token) = &self.session_token {
+            ("content-type;host;x-amz-date;x-amz-security-token".to_string(),
+             format!("POST\n/\n\ncontent-type:{content_type}\nhost:{host}\nx-amz-date:{amz_date}\nx-amz-security-token:{token}\n\ncontent-type;host;x-amz-date;x-amz-security-token\n{payload_hash}"))
+        } else {
+            ("content-type;host;x-amz-date".to_string(),
+             format!("POST\n/\n\ncontent-type:{content_type}\nhost:{host}\nx-amz-date:{amz_date}\n\ncontent-type;host;x-amz-date\n{payload_hash}"))
+        };
+        let auth = self.sign_v4(service, &date_stamp, &amz_date, &headers_to_sign, &canonical);
+
+        let mut hdrs: Vec<(&str, &str)> = vec![
+            ("Content-Type", content_type),
+            ("Host", &host),
+            ("X-Amz-Date", &amz_date),
+            ("Authorization", &auth),
+        ];
+        if let Some(token) = &self.session_token {
+            hdrs.push(("X-Amz-Security-Token", token));
+        }
+
+        let req = self.build_request("POST", &url, &hdrs, body.into_bytes());
+        let (status, text) = self.send(req).await?;
+
+        if status >= 300 {
+            return Err(parse_xml_error(&text, status));
+        }
         Ok(())
     }
 
     // ── JSON 1.1 protocol (SSM) ────────────────────────────────────────
 
-    pub async fn json_request<T: serde::de::DeserializeOwned>(
+    pub async fn json_request<T: super::json::FromJsonValue>(
         &self,
         service: &str,
         target: &str,
-        input: &impl serde::Serialize,
+        input: &impl super::json::ToJsonValue,
     ) -> Result<T, AwsError> {
-        let body = serde_json::to_string(input)
+        let body = serde_json::to_string(&input.to_json())
             .map_err(|e| AwsError::JsonParse(e.to_string()))?;
 
         let host = format!("{service}.{}.amazonaws.com", self.region);
@@ -217,24 +299,26 @@ impl Client {
         if status >= 300 {
             return Err(parse_json_error(&text, status));
         }
-        serde_json::from_str::<T>(&text)
-            .map_err(|e| AwsError::JsonParse(format!("{e}\n--- body ---\n{}", &text[..text.len().min(500)])))
+        let value: serde_json::Value = serde_json::from_str(&text)
+            .map_err(|e| AwsError::JsonParse(format!("{e}\n--- body ---\n{}", &text[..text.len().min(500)])))?;
+        Ok(T::from_json(&value))
     }
 
     // ── REST-JSON protocol (Lambda etc.) ───────────────────────────────
 
-    pub async fn rest_json_request<T: serde::de::DeserializeOwned>(
+    pub async fn rest_json_request<T: super::json::FromJsonValue>(
         &self,
         service: &str,
         method: &str,
         uri: &str,
         query: &[(String, String)],
         extra_headers: &[(String, String)],
-        input: &impl serde::Serialize,
+        input: &impl super::json::ToJsonValue,
     ) -> Result<T, AwsError> {
         let text = self.rest_json_raw(service, method, uri, query, extra_headers, input).await?;
-        serde_json::from_str::<T>(&text)
-            .map_err(|e| AwsError::JsonParse(format!("{e}\n--- body ---\n{}", &text[..text.len().min(500)])))
+        let value: serde_json::Value = serde_json::from_str(&text)
+            .map_err(|e| AwsError::JsonParse(format!("{e}\n--- body ---\n{}", &text[..text.len().min(500)])))?;
+        Ok(T::from_json(&value))
     }
 
     pub async fn rest_json_request_void(
@@ -244,7 +328,7 @@ impl Client {
         uri: &str,
         query: &[(String, String)],
         extra_headers: &[(String, String)],
-        input: &impl serde::Serialize,
+        input: &impl super::json::ToJsonValue,
     ) -> Result<(), AwsError> {
         self.rest_json_raw(service, method, uri, query, extra_headers, input).await?;
         Ok(())
@@ -257,9 +341,9 @@ impl Client {
         uri: &str,
         query: &[(String, String)],
         extra_headers: &[(String, String)],
-        input: &impl serde::Serialize,
+        input: &impl super::json::ToJsonValue,
     ) -> Result<String, AwsError> {
-        let body = serde_json::to_string(input)
+        let body = serde_json::to_string(&input.to_json())
             .map_err(|e| AwsError::JsonParse(e.to_string()))?;
 
         let (url, canonical_qs, host) = self.rest_url(service, uri, query);
@@ -302,7 +386,7 @@ impl Client {
 
     // ── REST-XML protocol (S3, Route53, etc.) ────────────────────────
 
-    pub async fn rest_xml_request<T: serde::de::DeserializeOwned>(
+    pub async fn rest_xml_request<T: super::xml::FromXml>(
         &self,
         service: &str,
         method: &str,
@@ -311,7 +395,9 @@ impl Client {
         extra_headers: &[(String, String)],
     ) -> Result<T, AwsError> {
         let text = self.rest_xml_raw(service, method, uri, query, extra_headers).await?;
-        quick_xml::de::from_str::<T>(&text)
+        let root = super::xml::XmlNode::parse(&text)
+            .map_err(|e| AwsError::XmlParse(format!("{e}\n--- body ---\n{}", &text[..text.len().min(500)])))?;
+        T::from_xml(&root)
             .map_err(|e| AwsError::XmlParse(format!("{e}\n--- body ---\n{}", &text[..text.len().min(500)])))
     }
 
