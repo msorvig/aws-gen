@@ -1,0 +1,12 @@
+[package]
+name    = "ec2-example"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+aws-api = { path = "../../aws-api" }
+serde   = { version = "1", features = ["derive"] }
+tokio   = { version = "1", features = ["rt", "macros"] }
+
+[build-dependencies]
+aws-codegen = { path = "../../codegen" }

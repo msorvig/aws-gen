@@ -1,0 +1,3 @@
+/target
+codegen/specs/*.json
+codegen/.DS_Store
