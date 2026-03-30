@@ -26,6 +26,7 @@ pub struct EmitCtx<'a> {
     /// Crate path for the aws-api runtime. Defaults to `"aws_api"`.
     /// Set to `"crate"` if the generated code lives inside the aws-api crate itself.
     pub runtime_crate:   &'a str,
+    pub sync:            bool,
 }
 
 pub fn emit(ctx: &EmitCtx<'_>) -> String {
@@ -73,6 +74,13 @@ pub fn emit(ctx: &EmitCtx<'_>) -> String {
             "rest-xml"  => emit_rest_xml_op(&mut out, ctx, op_name, op),
             _           => emit_query_op(&mut out, ctx, op_name, op), // fallback
         }
+    }
+
+    // Strip async/await for sync mode
+    if ctx.sync {
+        out = out.replace("pub async fn ", "pub fn ");
+        out = out.replace(".await?", "?");
+        out = out.replace(".await", "");
     }
 
     out

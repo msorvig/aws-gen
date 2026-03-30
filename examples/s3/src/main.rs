@@ -1,4 +1,4 @@
-use aws_api::aws::Client;
+use aws_runtime_async::aws::Client;
 
 #[allow(dead_code, non_snake_case, unused_variables, clippy::all)]
 mod s3 {

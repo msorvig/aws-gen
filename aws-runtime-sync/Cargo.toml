@@ -1,0 +1,9 @@
+[package]
+name    = "aws-runtime-sync"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+aws-runtime-common = { path = "../aws-runtime-common" }
+ureq               = { version = "3", features = ["rustls"] }
+http               = "1"

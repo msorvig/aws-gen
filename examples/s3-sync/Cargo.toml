@@ -1,0 +1,10 @@
+[package]
+name    = "s3-sync-example"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+aws-runtime-sync = { path = "../../aws-runtime-sync" }
+
+[build-dependencies]
+aws-codegen = { path = "../../codegen" }

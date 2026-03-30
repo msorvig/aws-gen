@@ -36,10 +36,11 @@ pub struct GenerateSpec<'a> {
     pub protocol:   Protocol,
     /// The subset of operations to generate (all transitive shapes are included).
     pub operations: &'a [&'a str],
-    /// Crate path for the aws-api runtime in generated code.
-    /// Use `"aws_api"` (default) when aws-api is an external dependency,
-    /// or `"crate"` if the generated code lives inside the aws-api crate.
+    /// Crate path for the runtime in generated code.
+    /// Use `"aws_runtime_async"` or `"aws_runtime_sync"`.
     pub runtime_crate: &'a str,
+    /// If true, emit sync functions instead of async.
+    pub sync: bool,
 }
 
 impl<'a> GenerateSpec<'a> {
@@ -82,6 +83,7 @@ impl<'a> GenerateSpec<'a> {
             operations:   self.operations,
             service_name: self.name,
             runtime_crate: self.runtime_crate,
+            sync: self.sync,
         };
         let code = emit::emit(&ctx);
 
@@ -114,6 +116,7 @@ impl<'a> GenerateSpec<'a> {
             operations:   self.operations,
             service_name: self.name,
             runtime_crate: self.runtime_crate,
+            sync: self.sync,
         };
         emit::emit(&ctx)
     }

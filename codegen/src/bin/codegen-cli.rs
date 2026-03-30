@@ -124,7 +124,8 @@ fn cmd_gen(spec_path: &str, name: &str, protocol: Protocol, ops: &[&str]) {
         name,
         protocol,
         operations: ops,
-        runtime_crate: "aws_api",
+        runtime_crate: "aws_runtime_async",
+        sync: false,
     };
 
     let code = spec.generate_from_spec(spec_path);

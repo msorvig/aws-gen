@@ -4,8 +4,8 @@ fn main() {
     GenerateSpec {
         name:          "s3",
         protocol:      Protocol::RestXml,
-        runtime_crate: "aws_runtime_async",
-        operations:    &["ListBuckets", "ListObjectsV2", "HeadObject"],
-        sync:          false,
+        runtime_crate: "aws_runtime_sync",
+        operations:    &["ListBuckets"],
+        sync:          true,
     }.generate();
 }

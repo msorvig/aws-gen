@@ -70,7 +70,7 @@ impl ToAwsStr for bool {
 /// Encode a list of key-value pairs into a URL-encoded form body.
 pub fn encode_form(params: &[(String, String)]) -> String {
     params.iter()
-        .map(|(k, v)| format!("{}={}", super::client::percent_encode(k), super::client::percent_encode(v)))
+        .map(|(k, v)| format!("{}={}", super::sign::percent_encode(k), super::sign::percent_encode(v)))
         .collect::<Vec<_>>()
         .join("&")
 }

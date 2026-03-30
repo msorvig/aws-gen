@@ -1,0 +1,13 @@
+[package]
+name    = "aws-runtime-async"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+aws-runtime-common = { path = "../aws-runtime-common" }
+hyper              = { version = "1", features = ["client", "http1"] }
+hyper-util         = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
+hyper-rustls       = { version = "0.27", default-features = false, features = ["ring", "webpki-tokio", "http1"] }
+http-body-util     = "0.1"
+bytes              = "1"
+tokio              = { version = "1", features = ["rt"] }
