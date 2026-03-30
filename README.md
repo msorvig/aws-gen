@@ -3,135 +3,124 @@
 Minimal, selective AWS API codegen for Rust.
 
 Generates typed Rust bindings for a hand-picked subset of AWS operations from
-the published botocore JSON specs. No official AWS SDK runtime crates. SigV4
-signing is self-contained in ~100 lines using `hmac` + `sha2`.
+the published botocore JSON specs. No official AWS SDK dependency. SigV4 signing
+is self-contained. Choose between async (hyper) and sync (ureq) runtimes.
 
 ## Structure
 
 ```
 aws-gen/
-├── codegen/            # Pure library crate, used as [build-dependencies]
+├── codegen/                  # Build-time code generator [build-dependencies]
+│   ├── specs/                # Bundled botocore service specs
 │   └── src/
-│       ├── lib.rs      # GenerateSpec — the public API for build.rs callers
-│       ├── model.rs    # Deserializes botocore service-2.json
-│       ├── resolve.rs  # Transitive shape closure + topological sort
-│       └── emit.rs     # Code emitter: structs, QueryEncode impls, async fns
+│       ├── lib.rs            # GenerateSpec — the public API
+│       ├── model.rs          # Deserializes botocore service-2.json
+│       ├── resolve.rs        # Transitive shape closure + topological sort
+│       └── emit.rs           # Emits structs, FromXml/JSON impls, operation fns
 │
-├── spotty/             # The actual application crate
-│   ├── specs/          # Checked-in botocore JSON specs (fetch with fetch_specs.sh)
-│   ├── build.rs        # Drives codegen — lists operations per service
-│   └── src/
-│       ├── aws/
-│       │   ├── client.rs       # Client struct + SigV4 signing + HTTP dispatch
-│       │   ├── error.rs        # AwsError + XML/JSON error parsers
-│       │   └── query_proto.rs  # QueryEncode trait + ToAwsStr + encode_form
-│       ├── lib.rs              # include!()s generated modules
-│       └── main.rs             # Usage examples
+├── aws-runtime-common/       # Shared runtime: signing, parsing, error types
+├── aws-runtime-async/        # Async Client (hyper + rustls + tokio)
+├── aws-runtime-sync/         # Sync Client (ureq + rustls, no tokio)
 │
-└── fetch_specs.sh      # One-time script to download botocore specs
+├── examples/
+│   ├── ec2/                  # Async EC2 DescribeInstances
+│   ├── s3/                   # Async S3 ListBuckets + ListObjectsV2
+│   ├── s3-sync/              # Sync S3 ListBuckets (no tokio)
+│   └── multi/                # Two services in one crate (EC2 + SSM)
+│
+└── fetch_specs.sh            # Downloads botocore specs into codegen/specs/
 ```
 
 ## Getting started
 
 ```sh
-# 1. Fetch the three botocore service specs (≈ 5 MB total)
+# 1. Fetch botocore service specs (one-time, ~6 MB total)
 bash fetch_specs.sh
 
-# 2. Build — codegen runs automatically as part of cargo build
-cargo build -p spotty
-
-# 3. Run
-AWS_DEFAULT_REGION=eu-west-1 \
-AWS_ACCESS_KEY_ID=AKIA... \
-AWS_SECRET_ACCESS_KEY=... \
-cargo run -p spotty -- spot-prices
+# 2. Build and run an example
+cargo run -p s3-sync-example
 ```
 
-Available commands: `spot-prices`, `describe`, `ami-ids`, `iam-user [name]`, `instance-types`.
+Credentials are resolved automatically via `aws configure export-credentials`
+(works with SSO, profiles, etc.) or from `AWS_ACCESS_KEY_ID` /
+`AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN` env vars.
 
-## How build.rs drives codegen
+## Using in your own crate
 
-`spotty/build.rs` calls `GenerateSpec::generate()` for each service:
+### 1. Add dependencies
 
-```rust
-GenerateSpec {
-    name:      "ec2",
-    spec_file: "specs/ec2.json",
-    protocol:  Protocol::Query,
-    operations: &["RunInstances", "DescribeInstances", ...],
-}.generate(&out_dir);
+For async:
+```toml
+[dependencies]
+aws-runtime-async = { path = "../aws-runtime-async" }
+tokio = { version = "1", features = ["rt", "macros"] }
+
+[build-dependencies]
+aws-codegen = { path = "../codegen" }
 ```
 
-`generate()` does:
-1. Parse `specs/ec2.json` (the full EC2 service model — ~15k shapes)
-2. Walk the transitive closure of shapes reachable from the requested operations
-3. Topologically sort them (dependencies before dependents)
-4. Emit `$OUT_DIR/ec2.rs` containing only the shapes actually used
+For sync (no tokio):
+```toml
+[dependencies]
+aws-runtime-sync = { path = "../aws-runtime-sync" }
 
-`spotty/src/lib.rs` then includes the generated file:
+[build-dependencies]
+aws-codegen = { path = "../codegen" }
+```
+
+### 2. Write build.rs
 
 ```rust
-pub mod ec2 {
-    include!(concat!(env!("OUT_DIR"), "/ec2.rs"));
+use aws_codegen::{GenerateSpec, Protocol};
+
+fn main() {
+    GenerateSpec {
+        name:          "s3",
+        protocol:      Protocol::RestXml,
+        runtime_crate: "aws_runtime_sync",  // or "aws_runtime_async"
+        operations:    &["ListBuckets", "ListObjectsV2"],
+        sync:          true,                // false for async
+    }.generate();
 }
 ```
 
-## Wire protocols
+The codegen reads the bundled botocore spec, walks the transitive closure of
+shapes reachable from the requested operations, topologically sorts them, and
+emits `$OUT_DIR/s3.rs` with only the types actually needed.
 
-### Query protocol (EC2, IAM)
+### 3. Include generated code
 
-Request: HTTP POST to `https://ec2.{region}.amazonaws.com/` with
-`Content-Type: application/x-www-form-urlencoded`. Body contains
-`Action=RunInstances&Version=2016-11-15&...`.
+```rust
+use aws_runtime_sync::aws::Client;
 
-Nested structs flatten to dotted paths:
+#[allow(dead_code, non_snake_case, unused_variables, clippy::all)]
+mod s3 {
+    include!(concat!(env!("OUT_DIR"), "/s3.rs"));
+}
+
+fn main() {
+    let client = Client::from_env();
+    let resp = s3::list_buckets(&client, s3::ListBucketsRequest::default()).unwrap();
+    for bucket in resp.buckets.iter().flat_map(|b| &b.item) {
+        println!("{}", bucket.name.as_deref().unwrap_or("?"));
+    }
+}
 ```
-InstanceMarketOptions.MarketType=spot
-InstanceMarketOptions.SpotOptions.MaxPrice=0.05
-```
 
-Lists use numeric suffixes:
-```
-SecurityGroupId.1=sg-abc123
-SecurityGroupId.2=sg-def456
-```
+## Supported protocols
 
-Response: XML. Generated via `quick-xml`'s serde support.
-
-**IAM result wrapper**: IAM response bodies wrap the result in an extra XML
-element (e.g., `<GetUserResult>...</GetUserResult>` inside
-`<GetUserResponse>`). The codegen detects this via the `resultWrapper` field
-in the spec and emits a private envelope struct to unwrap it. EC2 doesn't use
-an intermediate wrapper — the result is directly inside the response root.
-
-### JSON 1.1 protocol (SSM)
-
-Request: HTTP POST with `Content-Type: application/x-amz-json-1.1` and
-`X-Amz-Target: AmazonSSM.GetParameters`. Body is JSON.
-
-Response: JSON, deserialized with `serde_json`.
+| Protocol | Services | Request | Response |
+|----------|----------|---------|----------|
+| `Query` | EC2, IAM, STS | URL-encoded POST body | XML |
+| `Json` | SSM, DynamoDB | JSON POST body | JSON |
+| `RestJson` | Lambda, API Gateway | JSON + URI templates | JSON |
+| `RestXml` | S3, Route53 | URI/query/headers | XML |
 
 ## Adding operations
 
-Edit `spotty/build.rs` — add the operation name to the relevant `operations` slice.
-The codegen will automatically pull in all required shapes from the spec.
-
-```rust
-GenerateSpec {
-    name:      "ec2",
-    spec_file: "specs/ec2.json",
-    protocol:  Protocol::Query,
-    operations: &[
-        "RunInstances",
-        "TerminateInstances",
-        "RequestSpotInstances",  // ← new
-        ...
-    ],
-}.generate(&out_dir);
-```
-
-If the operation isn't found in the spec, `generate()` panics at build time
-with the list of available operations.
+Add the operation name to the `operations` slice in your `build.rs`. The codegen
+pulls in all required shapes automatically. If the operation doesn't exist in
+the spec, `generate()` panics at build time with the list of available operations.
 
 ## Adding a new service
 
@@ -140,47 +129,29 @@ with the list of available operations.
    fetch lambda "2015-03-31"
    ```
 
-2. Add a `GenerateSpec` block to `spotty/build.rs`:
-   ```rust
-   GenerateSpec {
-       name:      "lambda",
-       spec_file: "specs/lambda.json",
-       protocol:  Protocol::Json,    // rest-json, treated as json
-       operations: &["InvokeFunction", "ListFunctions"],
-   }.generate(&out);
-   ```
+2. Add a `GenerateSpec` block to your `build.rs` with the service name and
+   protocol. The spec is loaded from the bundled `codegen/specs/` directory.
 
-3. Add the `include!` in `spotty/src/lib.rs`:
-   ```rust
-   pub mod lambda {
-       include!(concat!(env!("OUT_DIR"), "/lambda.rs"));
-   }
-   ```
+## Dependency footprint
 
-## Known rough edges
+| Runtime | Crate count | Release binary |
+|---------|-------------|----------------|
+| async (hyper) | ~105 | ~3.2 MB |
+| sync (ureq) | ~61 | ~2.6 MB |
 
-**`rest-json` protocol** (Lambda, S3, etc.): operations have URL path templates
-like `/2015-03-31/functions/{FunctionName}/invocations`. The current `json`
-protocol handler always POSTs to `/` and ignores URI templates and location
-overrides. For `rest-json` services you'd need to add URI template expansion
-to `emit_json_op` using the `http.requestUri` field and `location: "uri"`
-member annotations. SSM uses the plain `json` protocol (always `/`), so it
-works correctly.
+No serde derives in generated code. No quick-xml. No url/idna/ICU crates.
+The generated code uses hand-rolled `FromXml` / `FromJsonValue` / `ToJsonValue`
+impls emitted by the codegen.
 
-**XML list deserialization edge cases**: EC2 uses `<item>` as the per-element
-tag name by convention, but some operations use custom element names from
-`member.locationName`. The list wrapper structs use `locationName` for the
-serde `rename` attribute. Verify output for any new operations that have
-unusual list shapes.
+## Known limitations
 
-**Map types in query protocol**: query-protocol maps (e.g., tag filter maps,
-attribute maps) are left as `HashMap<K, V>`. Serialization to query params
-for maps isn't implemented — add `QueryEncode` impls per map type if needed.
-
-**Pagination**: the botocore specs include `paginators-1.json` alongside
-`service-2.json`. Pagination isn't wired up — operations return at most one
-page. Implementing it requires following `NextToken` / `nextToken` in a loop;
-straightforward to add as a higher-level wrapper over the generated functions.
-
-**Timestamp types**: serialized as `String` (ISO 8601 / Unix epoch as AWS
-returns them). Parse with `chrono` or `time` in the caller if needed.
+- **Pagination**: not wired up — operations return one page. Follow `NextToken`
+  in a loop in caller code.
+- **rest-xml request bodies**: S3 PUT/POST operations that require an XML request
+  body (e.g. `CreateBucketConfiguration`) are not yet supported. Read operations
+  (ListBuckets, ListObjectsV2, HeadObject) work.
+- **Streaming responses**: GetObject returns the object body as a streaming
+  response, which the current client reads fully into a String. Not suitable
+  for large objects.
+- **Timestamps**: XML protocols use ISO 8601 strings; JSON protocols use `f64`
+  epoch seconds. No `chrono`/`time` integration.

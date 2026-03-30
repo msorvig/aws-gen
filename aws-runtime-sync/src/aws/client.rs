@@ -2,7 +2,12 @@ use aws_runtime_common::aws::error::AwsError;
 use aws_runtime_common::aws::query_proto;
 use aws_runtime_common::aws::sign::{self, Credentials};
 
+/// Blocking AWS HTTP client with SigV4 signing.
+///
+/// Resolves credentials from the `aws` CLI or environment variables.
+/// Uses ureq + rustls for HTTPS. No async runtime required.
 pub struct Client {
+    /// AWS credentials and region.
     pub creds: Credentials,
     agent: ureq::Agent,
 }
@@ -13,6 +18,8 @@ pub fn percent_encode(s: &str) -> String {
 }
 
 impl Client {
+    /// Create a client, resolving credentials from `aws configure export-credentials`
+    /// or falling back to `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` env vars.
     pub fn from_env() -> Self {
         Self {
             creds: Credentials::from_env(),

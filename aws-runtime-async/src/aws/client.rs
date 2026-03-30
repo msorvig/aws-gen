@@ -11,7 +11,12 @@ use aws_runtime_common::aws::sign::{self, Credentials};
 
 type HttpClient = HyperClient<hyper_rustls::HttpsConnector<hyper_util::client::legacy::connect::HttpConnector>, Full<Bytes>>;
 
+/// Async AWS HTTP client with SigV4 signing.
+///
+/// Resolves credentials from the `aws` CLI or environment variables.
+/// Uses hyper + rustls for HTTPS.
 pub struct Client {
+    /// AWS credentials and region.
     pub creds: Credentials,
     http: HttpClient,
 }
@@ -22,6 +27,8 @@ pub fn percent_encode(s: &str) -> String {
 }
 
 impl Client {
+    /// Create a client, resolving credentials from `aws configure export-credentials`
+    /// or falling back to `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` env vars.
     pub fn from_env() -> Self {
         let https = HttpsConnectorBuilder::new()
             .with_webpki_roots()

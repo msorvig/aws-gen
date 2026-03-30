@@ -1,3 +1,35 @@
+//! AWS API code generator.
+//!
+//! Generates typed Rust bindings for a hand-picked subset of AWS operations
+//! from botocore JSON service specs. Used as a `[build-dependencies]` crate
+//! — call [`GenerateSpec::generate`] from your `build.rs`.
+//!
+//! # Example
+//!
+//! ```rust,ignore
+//! // build.rs
+//! use aws_codegen::{GenerateSpec, Protocol};
+//!
+//! fn main() {
+//!     GenerateSpec {
+//!         name:          "ec2",
+//!         protocol:      Protocol::Query,
+//!         runtime_crate: "aws_runtime_async",
+//!         operations:    &["DescribeInstances"],
+//!         sync:          false,
+//!     }.generate();
+//! }
+//! ```
+//!
+//! Then in your crate:
+//!
+//! ```rust,ignore
+//! #[allow(dead_code, non_snake_case, unused_variables, clippy::all)]
+//! mod ec2 {
+//!     include!(concat!(env!("OUT_DIR"), "/ec2.rs"));
+//! }
+//! ```
+
 pub mod model;
 pub mod resolve;
 pub mod emit;

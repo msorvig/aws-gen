@@ -1,8 +1,13 @@
+/// Error type for AWS API operations.
 #[derive(Debug)]
 pub enum AwsError {
+    /// HTTP transport error (connection failure, timeout, etc.).
     Http(String),
+    /// Failed to parse an XML response body.
     XmlParse(String),
+    /// Failed to parse a JSON response body.
     JsonParse(String),
+    /// AWS returned a service-level error with a code and message.
     AwsService { code: String, message: String },
 }
 
