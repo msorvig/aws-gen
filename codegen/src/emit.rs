@@ -191,8 +191,6 @@ fn emit_structure(
             let member_shape = ctx.model.shapes.get(&member_ref.shape);
             let is_primitive_str = member_shape.map(|s| s.shape_type == "string" && s.enum_values.is_none()).unwrap_or(false);
             let is_bool = member_shape.map(|s| s.shape_type == "boolean").unwrap_or(false);
-            let _rust_type = rust_field_type(ctx, member_ref, true);
-
             // JSON key is PascalCase member name
             if required {
                 if is_primitive_str {
@@ -202,14 +200,12 @@ fn emit_structure(
                 } else {
                     writeln!(out, "            {rust_field}: v.get(\"{member_name}\").map(|v| {rt}::aws::json::FromJsonValue::from_json(v)).unwrap_or_default(),").unwrap();
                 }
+            } else if is_primitive_str {
+                writeln!(out, "            {rust_field}: v.get(\"{member_name}\").and_then(|v| v.as_str()).map(String::from),").unwrap();
+            } else if is_bool {
+                writeln!(out, "            {rust_field}: v.get(\"{member_name}\").and_then(|v| v.as_bool()),").unwrap();
             } else {
-                if is_primitive_str {
-                    writeln!(out, "            {rust_field}: v.get(\"{member_name}\").and_then(|v| v.as_str()).map(String::from),").unwrap();
-                } else if is_bool {
-                    writeln!(out, "            {rust_field}: v.get(\"{member_name}\").and_then(|v| v.as_bool()),").unwrap();
-                } else {
-                    writeln!(out, "            {rust_field}: v.get(\"{member_name}\").filter(|v| !v.is_null()).map(|v| {rt}::aws::json::FromJsonValue::from_json(v)),").unwrap();
-                }
+                writeln!(out, "            {rust_field}: v.get(\"{member_name}\").filter(|v| !v.is_null()).map(|v| {rt}::aws::json::FromJsonValue::from_json(v)),").unwrap();
             }
         }
 
@@ -672,7 +668,7 @@ fn emit_rest_json_op(
     writeln!(out, "    client: &Client{input_param},").unwrap();
     writeln!(out, ") -> Result<{output_type}, AwsError> {{").unwrap();
 
-    if let Some(_) = input_type {
+    if input_type.is_some() {
         // Collect members by location from the input shape
         let input_shape_name = op.input.as_ref().map(|r| r.shape.as_str()).unwrap_or("");
         let members: Vec<(String, ShapeRef)> = ctx.model.shapes
@@ -889,12 +885,10 @@ fn emit_rest_xml_op(
             } else {
                 writeln!(out, "    client.rest_xml_request(\"{endpoint}\", \"{method}\", uri, &_query, &[]).await").unwrap();
             }
+        } else if output_type == "()" {
+            writeln!(out, "    client.rest_xml_request_void(\"{endpoint}\", \"{method}\", uri, &[], &[]).await").unwrap();
         } else {
-            if output_type == "()" {
-                writeln!(out, "    client.rest_xml_request_void(\"{endpoint}\", \"{method}\", uri, &[], &[]).await").unwrap();
-            } else {
-                writeln!(out, "    client.rest_xml_request(\"{endpoint}\", \"{method}\", uri, &[], &[]).await").unwrap();
-            }
+            writeln!(out, "    client.rest_xml_request(\"{endpoint}\", \"{method}\", uri, &[], &[]).await").unwrap();
         }
     }
 

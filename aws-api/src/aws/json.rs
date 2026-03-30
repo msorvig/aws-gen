@@ -1,5 +1,5 @@
-/// Traits for JSON serialization/deserialization without serde derives.
-/// Uses serde_json::Value as the interchange format.
+//! Traits for JSON serialization/deserialization without serde derives.
+//! Uses serde_json::Value as the interchange format.
 
 use serde_json::Value;
 
