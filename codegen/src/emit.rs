@@ -132,6 +132,44 @@ fn emit_structure(
     writeln!(out, "}}").unwrap();
     writeln!(out).unwrap();
 
+    // ── Builder methods for input structs ───────────────────────────────
+    if in_input {
+        writeln!(out, "impl {rust_name} {{").unwrap();
+        for (member_name, member_ref) in &shape.members {
+            let rust_field = to_snake(member_name);
+            let rust_type  = rust_field_type(ctx, member_ref, false);
+            let required   = req_set.contains(member_name.as_str());
+            let member_shape = ctx.model.shapes.get(&member_ref.shape);
+            let is_list = member_shape.map(|s| s.shape_type == "list").unwrap_or(false);
+
+            if is_list && !required {
+                // List field: push a single item into the list
+                let item_type = member_shape
+                    .and_then(|s| s.member.as_ref())
+                    .map(|m| rust_type_by_name(&m.shape, ctx.model, false))
+                    .unwrap_or_else(|| "String".to_string());
+                writeln!(out, "    pub fn {rust_field}(mut self, v: {item_type}) -> Self {{").unwrap();
+                writeln!(out, "        self.{rust_field}.get_or_insert_with(Default::default).item.push(v);").unwrap();
+                writeln!(out, "        self").unwrap();
+                writeln!(out, "    }}").unwrap();
+            } else if required {
+                // Required field: set directly
+                writeln!(out, "    pub fn {rust_field}(mut self, v: {rust_type}) -> Self {{").unwrap();
+                writeln!(out, "        self.{rust_field} = v;").unwrap();
+                writeln!(out, "        self").unwrap();
+                writeln!(out, "    }}").unwrap();
+            } else {
+                // Optional field: wrap in Some
+                writeln!(out, "    pub fn {rust_field}(mut self, v: {rust_type}) -> Self {{").unwrap();
+                writeln!(out, "        self.{rust_field} = Some(v);").unwrap();
+                writeln!(out, "        self").unwrap();
+                writeln!(out, "    }}").unwrap();
+            }
+        }
+        writeln!(out, "}}").unwrap();
+        writeln!(out).unwrap();
+    }
+
     // ── FromXml impl for XML output (query/ec2, rest-xml) ──────────────
     if in_output && is_xml {
         writeln!(out, "impl {rt}::aws::xml::FromXml for {rust_name} {{").unwrap();
