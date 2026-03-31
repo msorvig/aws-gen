@@ -313,7 +313,9 @@ fn emit_query_encode_impl(
 
     for (member_name, member_ref) in &shape.members {
         let rust_field = to_snake(member_name);
-        let wire_name  = member_ref.wire_name(member_name);
+        // For query protocol encoding, use the PascalCase member name from the
+        // botocore spec, not the camelCase locationName (which is for XML parsing).
+        let wire_name  = member_name.as_str();
         let required   = req_set.contains(member_name.as_str());
         let member_shape = ctx.model.shapes.get(&member_ref.shape);
 
@@ -329,17 +331,16 @@ fn emit_query_encode_impl(
         }
 
         if is_list {
-            let item_wire = member_shape
-                .and_then(|s| s.member.as_ref())
-                .and_then(|m| m.location_name.as_deref())
-                .unwrap_or(wire_name);
+            // For query encoding, use the member's locationName if present
+            // (e.g., Values -> "Value"), otherwise fall back to the member name.
+            let list_wire = member_ref.location_name.as_deref().unwrap_or(wire_name);
             if required {
                 writeln!(out,
-                    "self.{rust_field}.encode(&format!(\"{{p}}{wire_name}\"), out);",
+                    "self.{rust_field}.encode(&format!(\"{{p}}{list_wire}\"), out);",
                 ).unwrap();
             } else {
                 writeln!(out,
-                    "val.encode_items(&format!(\"{{p}}{item_wire}\"), out);",
+                    "val.encode_items(&format!(\"{{p}}{list_wire}\"), out);",
                 ).unwrap();
             }
         } else if is_struct || is_map {
