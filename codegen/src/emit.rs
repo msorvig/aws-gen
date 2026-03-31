@@ -148,20 +148,35 @@ fn emit_structure(
                     .and_then(|s| s.member.as_ref())
                     .map(|m| rust_type_by_name(&m.shape, ctx.model, false))
                     .unwrap_or_else(|| "String".to_string());
-                writeln!(out, "    pub fn {rust_field}(mut self, v: {item_type}) -> Self {{").unwrap();
-                writeln!(out, "        self.{rust_field}.get_or_insert_with(Default::default).item.push(v);").unwrap();
+                if item_type == "String" {
+                    writeln!(out, "    pub fn {rust_field}(mut self, v: impl Into<String>) -> Self {{").unwrap();
+                    writeln!(out, "        self.{rust_field}.get_or_insert_with(Default::default).item.push(v.into());").unwrap();
+                } else {
+                    writeln!(out, "    pub fn {rust_field}(mut self, v: {item_type}) -> Self {{").unwrap();
+                    writeln!(out, "        self.{rust_field}.get_or_insert_with(Default::default).item.push(v);").unwrap();
+                }
                 writeln!(out, "        self").unwrap();
                 writeln!(out, "    }}").unwrap();
             } else if required {
                 // Required field: set directly
-                writeln!(out, "    pub fn {rust_field}(mut self, v: {rust_type}) -> Self {{").unwrap();
-                writeln!(out, "        self.{rust_field} = v;").unwrap();
+                if rust_type == "String" {
+                    writeln!(out, "    pub fn {rust_field}(mut self, v: impl Into<String>) -> Self {{").unwrap();
+                    writeln!(out, "        self.{rust_field} = v.into();").unwrap();
+                } else {
+                    writeln!(out, "    pub fn {rust_field}(mut self, v: {rust_type}) -> Self {{").unwrap();
+                    writeln!(out, "        self.{rust_field} = v;").unwrap();
+                }
                 writeln!(out, "        self").unwrap();
                 writeln!(out, "    }}").unwrap();
             } else {
                 // Optional field: wrap in Some
-                writeln!(out, "    pub fn {rust_field}(mut self, v: {rust_type}) -> Self {{").unwrap();
-                writeln!(out, "        self.{rust_field} = Some(v);").unwrap();
+                if rust_type == "String" {
+                    writeln!(out, "    pub fn {rust_field}(mut self, v: impl Into<String>) -> Self {{").unwrap();
+                    writeln!(out, "        self.{rust_field} = Some(v.into());").unwrap();
+                } else {
+                    writeln!(out, "    pub fn {rust_field}(mut self, v: {rust_type}) -> Self {{").unwrap();
+                    writeln!(out, "        self.{rust_field} = Some(v);").unwrap();
+                }
                 writeln!(out, "        self").unwrap();
                 writeln!(out, "    }}").unwrap();
             }
