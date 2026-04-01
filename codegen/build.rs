@@ -14,7 +14,6 @@ const SERVICES: &[(&str, &str)] = &[
 fn fetch(service: &str, date: &str, specs_dir: &Path) {
     let out = specs_dir.join(format!("{service}.json"));
     if out.exists() {
-        println!("cargo::warning=specs: exists {}", out.display());
         return;
     }
 
@@ -42,6 +41,9 @@ fn main() {
         fetch(service, date, &specs_dir);
     }
 
-    // Only re-run if specs directory changes
-    println!("cargo::rerun-if-changed=specs");
+    // Only re-run if a spec file is missing or build.rs itself changes
+    println!("cargo::rerun-if-changed=build.rs");
+    for &(service, _) in SERVICES {
+        println!("cargo::rerun-if-changed=specs/{service}.json");
+    }
 }
