@@ -21,6 +21,7 @@ dependencies = [
  "indexmap",
  "serde",
  "serde_json",
+ "ureq",
 ]
 
 [[package]]
