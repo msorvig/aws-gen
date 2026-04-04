@@ -5,10 +5,12 @@ const BOTOCORE: &str =
     "https://raw.githubusercontent.com/boto/botocore/develop/botocore/data";
 
 const SERVICES: &[(&str, &str)] = &[
-    ("ec2",  "2016-11-15"),
-    ("s3",   "2006-03-01"),
-    ("ssm",  "2014-11-06"),
-    ("iam",  "2010-05-08"),
+    ("ec2",    "2016-11-15"),
+    ("s3",     "2006-03-01"),
+    ("ssm",    "2014-11-06"),
+    ("iam",    "2010-05-08"),
+    ("lambda", "2015-03-31"),
+    ("sts",    "2011-06-15"),
 ];
 
 fn fetch(service: &str, date: &str, specs_dir: &Path) {
