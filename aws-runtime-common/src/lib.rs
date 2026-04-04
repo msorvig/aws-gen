@@ -4,4 +4,5 @@
 //! instead, which re-export everything from this crate.
 
 pub mod aws;
+pub mod base64;
 pub use serde_json;

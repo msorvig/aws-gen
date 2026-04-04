@@ -65,6 +65,25 @@ impl ToJsonValue for bool {
     fn to_json(&self) -> Value { Value::Bool(*self) }
 }
 
+// ── Blob (Vec<u8>) impls ──────────────────────────────────────────────
+
+impl FromJsonValue for Vec<u8> {
+    fn from_json(v: &Value) -> Self {
+        use crate::base64;
+        match v.as_str() {
+            Some(s) => base64::decode(s),
+            None => Vec::new(),
+        }
+    }
+}
+
+impl ToJsonValue for Vec<u8> {
+    fn to_json(&self) -> Value {
+        use crate::base64;
+        Value::String(base64::encode(self))
+    }
+}
+
 // ── Option impls ───────────────────────────────────────────────────────
 
 impl<T: FromJsonValue> FromJsonValue for Option<T> {

@@ -20,4 +20,5 @@ pub mod aws {
     pub mod client;
     pub use client::Client;
 }
+pub use aws_runtime_common::base64;
 pub use aws_runtime_common::serde_json;
