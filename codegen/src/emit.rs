@@ -279,6 +279,7 @@ fn emit_structure(
     // ── ToJsonValue impl for JSON input (json, rest-json) ──────────────
     if in_input && is_json {
         writeln!(out, "impl {rt}::aws::json::ToJsonValue for {rust_name} {{").unwrap();
+        writeln!(out, "    #[allow(unused_mut)]").unwrap();
         writeln!(out, "    fn to_json(&self) -> {rt}::serde_json::Value {{").unwrap();
         writeln!(out, "        let mut m = {rt}::serde_json::Map::new();").unwrap();
 
