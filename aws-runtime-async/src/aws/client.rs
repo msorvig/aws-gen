@@ -48,6 +48,20 @@ impl Client {
         }
     }
 
+    /// Create a client from explicit credentials (no env/CLI resolution).
+    pub fn new(creds: Credentials) -> Self {
+        let https = HttpsConnectorBuilder::new()
+            .with_webpki_roots()
+            .https_or_http()
+            .enable_http1()
+            .build();
+        Self {
+            creds,
+            endpoint: None,
+            http: HyperClient::builder(TokioExecutor::new()).build(https),
+        }
+    }
+
     /// Point the client at a custom endpoint (local simulator, MinIO, ...).
     pub fn with_endpoint(mut self, endpoint: impl Into<String>) -> Self {
         self.endpoint = Some(endpoint.into());

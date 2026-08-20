@@ -32,6 +32,15 @@ impl Client {
         }
     }
 
+    /// Create a client from explicit credentials (no env/CLI resolution).
+    pub fn new(creds: Credentials) -> Self {
+        Self {
+            creds,
+            endpoint: None,
+            agent: ureq::Agent::new_with_defaults(),
+        }
+    }
+
     /// Point the client at a custom endpoint (local simulator, MinIO, ...).
     pub fn with_endpoint(mut self, endpoint: impl Into<String>) -> Self {
         self.endpoint = Some(endpoint.into());
