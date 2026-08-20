@@ -650,7 +650,7 @@ fn emit_string_enum(out: &mut String, ctx: &EmitCtx<'_>, name: &str, shape: &Sha
 
     // from_str helper (shared by FromXml and FromJsonValue)
     writeln!(out, "impl {rust_name} {{").unwrap();
-    writeln!(out, "    fn from_str(s: &str) -> Self {{").unwrap();
+    writeln!(out, "    pub fn from_str(s: &str) -> Self {{").unwrap();
     writeln!(out, "        match s {{").unwrap();
     for v in enum_vals {
         let variant = sanitize_enum_variant(v);
