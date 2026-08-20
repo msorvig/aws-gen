@@ -100,7 +100,11 @@ impl Client {
     ) -> Result<T, AwsError> {
         let (status, text) = self.query_raw(service, version, action, params)?;
         if status >= 300 { return Err(sign::parse_xml_error(&text, status)); }
-        let root = aws_runtime_common::aws::xml::XmlNode::parse(&text)
+        // Some operations return success with an empty body (S3
+        // CreateBucket, PutObject: everything of note is in headers).
+        // Parse those as an empty document so outputs default.
+        let text_ref: &str = if text.trim().is_empty() { "<Empty/>" } else { &text };
+        let root = aws_runtime_common::aws::xml::XmlNode::parse(text_ref)
             .map_err(|e| AwsError::XmlParse(format!("{e}\n--- body ---\n{}", &text[..text.len().min(500)])))?;
         T::from_xml(&root)
             .map_err(|e| AwsError::XmlParse(format!("{e}\n--- body ---\n{}", &text[..text.len().min(500)])))
@@ -244,7 +248,11 @@ impl Client {
         extra_headers: &[(String, String)],
     ) -> Result<T, AwsError> {
         let text = self.rest_xml_raw(service, method, uri, query, extra_headers)?;
-        let root = aws_runtime_common::aws::xml::XmlNode::parse(&text)
+        // Some operations return success with an empty body (S3
+        // CreateBucket, PutObject: everything of note is in headers).
+        // Parse those as an empty document so outputs default.
+        let text_ref: &str = if text.trim().is_empty() { "<Empty/>" } else { &text };
+        let root = aws_runtime_common::aws::xml::XmlNode::parse(text_ref)
             .map_err(|e| AwsError::XmlParse(format!("{e}\n--- body ---\n{}", &text[..text.len().min(500)])))?;
         T::from_xml(&root)
             .map_err(|e| AwsError::XmlParse(format!("{e}\n--- body ---\n{}", &text[..text.len().min(500)])))
@@ -269,7 +277,11 @@ impl Client {
         let (status, bytes) = self.rest_xml_send(service, method, uri, query, extra_headers, body, content_md5)?;
         let text = String::from_utf8_lossy(&bytes);
         if status >= 300 { return Err(sign::parse_xml_error(&text, status)); }
-        let root = aws_runtime_common::aws::xml::XmlNode::parse(&text)
+        // Some operations return success with an empty body (S3
+        // CreateBucket, PutObject: everything of note is in headers).
+        // Parse those as an empty document so outputs default.
+        let text_ref: &str = if text.trim().is_empty() { "<Empty/>" } else { &text };
+        let root = aws_runtime_common::aws::xml::XmlNode::parse(text_ref)
             .map_err(|e| AwsError::XmlParse(format!("{e}\n--- body ---\n{}", &text[..text.len().min(500)])))?;
         T::from_xml(&root)
             .map_err(|e| AwsError::XmlParse(format!("{e}\n--- body ---\n{}", &text[..text.len().min(500)])))
