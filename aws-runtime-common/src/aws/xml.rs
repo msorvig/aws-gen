@@ -226,3 +226,20 @@ impl<V: FromXml> FromXml for std::collections::HashMap<String, V> {
         Ok(map)
     }
 }
+
+/// Escape text for inclusion in an XML element (used by generated
+/// request-body serializers).
+pub fn escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&apos;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}

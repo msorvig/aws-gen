@@ -9,6 +9,9 @@ use aws_runtime_common::aws::sign::{self, Credentials};
 pub struct Client {
     /// AWS credentials and region.
     pub creds: Credentials,
+    /// Endpoint override, e.g. `http://127.0.0.1:9000` for a local S3
+    /// simulator or MinIO. `None` = the real AWS endpoint for the service.
+    pub endpoint: Option<String>,
     agent: ureq::Agent,
 }
 
@@ -20,14 +23,27 @@ pub fn percent_encode(s: &str) -> String {
 impl Client {
     /// Create a client, resolving credentials from `aws configure export-credentials`
     /// or falling back to `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` env vars.
+    /// Honours `AWS_ENDPOINT_URL` for endpoint overrides.
     pub fn from_env() -> Self {
         Self {
             creds: Credentials::from_env(),
+            endpoint: std::env::var("AWS_ENDPOINT_URL").ok(),
             agent: ureq::Agent::new_with_defaults(),
         }
     }
 
+    /// Point the client at a custom endpoint (local simulator, MinIO, ...).
+    pub fn with_endpoint(mut self, endpoint: impl Into<String>) -> Self {
+        self.endpoint = Some(endpoint.into());
+        self
+    }
+
     fn send(&self, method: &str, url: &str, headers: &[(&str, &str)], body: &[u8]) -> Result<(u16, String), AwsError> {
+        let (status, bytes) = self.send_bytes(method, url, headers, body)?;
+        Ok((status, String::from_utf8_lossy(&bytes).into_owned()))
+    }
+
+    fn send_bytes(&self, method: &str, url: &str, headers: &[(&str, &str)], body: &[u8]) -> Result<(u16, Vec<u8>), AwsError> {
         let mut builder = http::Request::builder().method(method).uri(url);
         for &(k, v) in headers {
             builder = builder.header(k, v);
@@ -35,13 +51,33 @@ impl Client {
         let req = builder.body(body.to_vec()).map_err(|e| AwsError::Http(e.to_string()))?;
         let resp = self.agent.run(req).map_err(|e| AwsError::Http(e.to_string()))?;
         let status = resp.status().as_u16();
-        let text = resp.into_body().read_to_string()
+        let bytes = resp.into_body().read_to_vec()
             .map_err(|e| AwsError::Http(e.to_string()))?;
-        Ok((status, text))
+        Ok((status, bytes))
+    }
+
+    /// The request base URL (no trailing slash) and the Host header value,
+    /// honouring the endpoint override.
+    fn base(&self, service: &str) -> (String, String) {
+        match &self.endpoint {
+            Some(endpoint) => {
+                let base = endpoint.trim_end_matches('/').to_string();
+                let host = base
+                    .split_once("://")
+                    .map(|(_, rest)| rest)
+                    .unwrap_or(&base)
+                    .to_string();
+                (base, host)
+            }
+            None => {
+                let host = format!("{service}.{}.amazonaws.com", self.creds.region);
+                (format!("https://{host}"), host)
+            }
+        }
     }
 
     fn host(&self, service: &str) -> String {
-        format!("{service}.{}.amazonaws.com", self.creds.region)
+        self.base(service).1
     }
 
     fn sign(&self, service: &str, date_stamp: &str, amz_date: &str, signed_headers: &str, canonical: &str) -> String {
@@ -82,8 +118,8 @@ impl Client {
         params.push(("Action".into(), action.into()));
         params.push(("Version".into(), version.into()));
         let body = query_proto::encode_form(&params);
-        let host = self.host(service);
-        let url = format!("https://{host}/");
+        let (base, host) = self.base(service);
+        let url = format!("{base}/");
         let (date_stamp, amz_date) = sign::now_stamps();
         let content_type = "application/x-www-form-urlencoded; charset=utf-8";
         let payload_hash = sign::hex_sha256(body.as_bytes());
@@ -111,8 +147,8 @@ impl Client {
         &self, service: &str, target: &str, input: &impl aws_runtime_common::aws::json::ToJsonValue,
     ) -> Result<T, AwsError> {
         let body = serde_json::to_string(&input.to_json()).map_err(|e| AwsError::JsonParse(e.to_string()))?;
-        let host = self.host(service);
-        let url = format!("https://{host}/");
+        let (base, host) = self.base(service);
+        let url = format!("{base}/");
         let content_type = "application/x-amz-json-1.1";
         let (date_stamp, amz_date) = sign::now_stamps();
         let payload_hash = sign::hex_sha256(body.as_bytes());
@@ -164,9 +200,9 @@ impl Client {
         extra_headers: &[(String, String)], input: &impl aws_runtime_common::aws::json::ToJsonValue,
     ) -> Result<String, AwsError> {
         let body = serde_json::to_string(&input.to_json()).map_err(|e| AwsError::JsonParse(e.to_string()))?;
-        let host = self.host(service);
+        let (base, host) = self.base(service);
         let qs = sign::build_query_string(query);
-        let url = format!("https://{host}{uri}{qs}");
+        let url = format!("{base}{uri}{qs}");
         let canonical_qs = sign::canonical_query_string(query);
         let content_type = "application/json";
         let (date_stamp, amz_date) = sign::now_stamps();
@@ -213,16 +249,70 @@ impl Client {
         Ok(())
     }
 
+    /// REST-XML request carrying a request body (raw blob like PutObject,
+    /// or serialized XML like DeleteObjects' Delete), XML response.
+    /// `content_md5` adds the Content-MD5 header operations like
+    /// DeleteObjects require.
+    pub fn rest_xml_request_body<T: aws_runtime_common::aws::xml::FromXml>(
+        &self, service: &str, method: &str, uri: &str, query: &[(String, String)],
+        extra_headers: &[(String, String)], body: &[u8], content_md5: bool,
+    ) -> Result<T, AwsError> {
+        let (status, bytes) = self.rest_xml_send(service, method, uri, query, extra_headers, body, content_md5)?;
+        let text = String::from_utf8_lossy(&bytes);
+        if status >= 300 { return Err(sign::parse_xml_error(&text, status)); }
+        let root = aws_runtime_common::aws::xml::XmlNode::parse(&text)
+            .map_err(|e| AwsError::XmlParse(format!("{e}\n--- body ---\n{}", &text[..text.len().min(500)])))?;
+        T::from_xml(&root)
+            .map_err(|e| AwsError::XmlParse(format!("{e}\n--- body ---\n{}", &text[..text.len().min(500)])))
+    }
+
+    /// As [`Self::rest_xml_request_body`], discarding the response body.
+    pub fn rest_xml_request_body_void(
+        &self, service: &str, method: &str, uri: &str, query: &[(String, String)],
+        extra_headers: &[(String, String)], body: &[u8], content_md5: bool,
+    ) -> Result<(), AwsError> {
+        let (status, bytes) = self.rest_xml_send(service, method, uri, query, extra_headers, body, content_md5)?;
+        if status >= 300 {
+            let text = String::from_utf8_lossy(&bytes);
+            return Err(sign::parse_xml_error(&text, status));
+        }
+        Ok(())
+    }
+
+    /// REST-XML request whose *response* is a raw blob (GetObject). Errors
+    /// still arrive as XML and are parsed as such.
+    pub fn rest_xml_request_blob(
+        &self, service: &str, method: &str, uri: &str, query: &[(String, String)],
+        extra_headers: &[(String, String)],
+    ) -> Result<Vec<u8>, AwsError> {
+        let (status, bytes) = self.rest_xml_send(service, method, uri, query, extra_headers, &[], false)?;
+        if status >= 300 {
+            let text = String::from_utf8_lossy(&bytes);
+            return Err(sign::parse_xml_error(&text, status));
+        }
+        Ok(bytes)
+    }
+
     fn rest_xml_raw(
         &self, service: &str, method: &str, uri: &str, query: &[(String, String)],
         extra_headers: &[(String, String)],
     ) -> Result<String, AwsError> {
-        let host = self.host(service);
+        let (status, bytes) = self.rest_xml_send(service, method, uri, query, extra_headers, &[], false)?;
+        let text = String::from_utf8_lossy(&bytes).into_owned();
+        if status >= 300 { return Err(sign::parse_xml_error(&text, status)); }
+        Ok(text)
+    }
+
+    fn rest_xml_send(
+        &self, service: &str, method: &str, uri: &str, query: &[(String, String)],
+        extra_headers: &[(String, String)], body: &[u8], content_md5: bool,
+    ) -> Result<(u16, Vec<u8>), AwsError> {
+        let (base, host) = self.base(service);
         let qs = sign::build_query_string(query);
-        let url = format!("https://{host}{uri}{qs}");
+        let url = format!("{base}{uri}{qs}");
         let canonical_qs = sign::canonical_query_string(query);
         let (date_stamp, amz_date) = sign::now_stamps();
-        let payload_hash = sign::hex_sha256(b"");
+        let payload_hash = sign::hex_sha256(body);
 
         let (hdr_str, canonical) = self.build_canonical_s3(method, uri, &canonical_qs, &host, &amz_date, &payload_hash);
         let auth = self.sign(service, &date_stamp, &amz_date, &hdr_str, &canonical);
@@ -238,10 +328,13 @@ impl Client {
             token_ref = token.clone();
             hdrs.push(("X-Amz-Security-Token", &token_ref));
         }
+        let md5_b64;
+        if content_md5 {
+            md5_b64 = aws_runtime_common::base64::encode(&aws_runtime_common::md5::digest(body));
+            hdrs.push(("Content-MD5", &md5_b64));
+        }
         for (k, v) in extra_headers { hdrs.push((k, v)); }
-        let (status, text) = self.send(method, &url, &hdrs, &[])?;
-        if status >= 300 { return Err(sign::parse_xml_error(&text, status)); }
-        Ok(text)
+        self.send_bytes(method, &url, &hdrs, body)
     }
 
     // ── Canonical request builders (same logic as async) ───────────────

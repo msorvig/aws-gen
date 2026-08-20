@@ -35,7 +35,32 @@ pub struct Operation {
     /// Query protocol wraps the response body inside this element name.
     /// If absent the root element is the result directly.
     pub result_wrapper: Option<String>,
+    /// Legacy flag: the operation requires a Content-MD5 header over the
+    /// request body. Modern specs use `httpChecksum` instead.
+    #[serde(rename = "httpChecksumRequired", default)]
+    pub http_checksum_required: bool,
+    /// Modern checksum requirements (e.g. S3 DeleteObjects).
+    pub http_checksum: Option<HttpChecksum>,
     pub documentation:  Option<String>,
+}
+
+impl Operation {
+    /// True when the request body must carry a Content-MD5 header.
+    pub fn checksum_required(&self) -> bool {
+        self.http_checksum_required
+            || self
+                .http_checksum
+                .as_ref()
+                .is_some_and(|c| c.request_checksum_required)
+    }
+}
+
+#[derive(Debug, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct HttpChecksum {
+    #[serde(default)]
+    pub request_checksum_required: bool,
+    pub request_algorithm_member: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -79,10 +104,17 @@ pub struct Shape {
     /// Members listed here are non-optional in the generated struct.
     #[serde(default)]
     pub required: Vec<String>,
+    /// REST protocols: the member that IS the HTTP body (a blob for raw
+    /// payloads like S3 Get/PutObject, or a structure serialized as the
+    /// body like S3 DeleteObjects' Delete).
+    pub payload:  Option<String>,
 
     // ── list fields ───────────────────────────────────────────────────────────
     /// The item shape reference (and its locationName = XML element name for items).
     pub member:   Option<ShapeRef>,
+    /// Flattened lists serialize items directly (no wrapper element).
+    #[serde(default)]
+    pub flattened: bool,
 
     // ── map fields ────────────────────────────────────────────────────────────
     pub key:      Option<ShapeRef>,
