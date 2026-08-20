@@ -263,6 +263,9 @@ fn emit_structure(
                 if wire != member_name { wire.to_string() } else { to_camel(member_name) }
             };
 
+            let is_flattened_list = is_list
+                && member_shape.map(|s| s.flattened).unwrap_or(false);
+
             if is_blob {
                 // Blobs embedded in XML are base64 text. (Payload blobs never
                 // reach from_xml: their operation returns the raw bytes and
@@ -272,8 +275,22 @@ fn emit_structure(
                 } else {
                     writeln!(out, "            {rust_field}: node.child(\"{xml_name}\").and_then(|n| n.text()).map(|t| {rt}::base64::decode(&t)),").unwrap();
                 }
+            } else if is_flattened_list {
+                // Flattened lists repeat the member's element name directly
+                // under the parent (S3's <Contents>...</Contents> entries);
+                // there is no wrapper element to descend into.
+                let t = rust_field_type(ctx, member_ref, true);
+                let collect = format!(
+                    "{t} {{ item: node.children(\"{xml_name}\").into_iter().map(|n| {rt}::aws::xml::FromXml::from_xml(n)).collect::<Result<Vec<_>, _>>()? }}"
+                );
+                if required {
+                    writeln!(out, "            {rust_field}: {collect},").unwrap();
+                } else {
+                    writeln!(out, "            {rust_field}: Some({collect}),").unwrap();
+                }
             } else if is_list {
-                // Lists: the list wrapper's FromXml handles child elements
+                // Wrapped lists: the wrapper's FromXml reads the items
+                // inside the wrapper element.
                 if required {
                     writeln!(out, "            {rust_field}: {t}::from_xml(node.child(\"{xml_name}\").unwrap_or(node))?,",
                         t = rust_field_type(ctx, member_ref, true)).unwrap();
