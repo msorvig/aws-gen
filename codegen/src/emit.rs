@@ -1060,9 +1060,9 @@ fn emit_rest_xml_op(
         // Static query params from URI template
         if let Some(sq) = static_qs {
             for part in sq.split('&') {
-                if let Some((k, v)) = part.split_once('=') {
-                    writeln!(out, "    _query.push((\"{k}\".into(), \"{v}\".into()));").unwrap();
-                }
+                // Valueless params ("?delete") become empty-valued pairs.
+                let (k, v) = part.split_once('=').unwrap_or((part, ""));
+                writeln!(out, "    _query.push((\"{k}\".into(), \"{v}\".into()));").unwrap();
             }
         }
         for (mname, mref) in &qs_members {
@@ -1168,9 +1168,9 @@ fn emit_rest_xml_op(
         if let Some(sq) = static_qs {
             writeln!(out, "    let _query: Vec<(String, String)> = vec![").unwrap();
             for part in sq.split('&') {
-                if let Some((k, v)) = part.split_once('=') {
-                    writeln!(out, "        (\"{k}\".into(), \"{v}\".into()),").unwrap();
-                }
+                // Valueless params ("?delete") become empty-valued pairs.
+                let (k, v) = part.split_once('=').unwrap_or((part, ""));
+                writeln!(out, "        (\"{k}\".into(), \"{v}\".into()),").unwrap();
             }
             writeln!(out, "    ];").unwrap();
             if output_type == "()" {
